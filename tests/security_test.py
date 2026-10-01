@@ -2194,6 +2194,53 @@ class BookText(unittest.TestCase):
                          [3723.5, 123.5, 63.5, 1.5, 4.0])
 
 
+class ReadAlongDoesNotAmplify(unittest.TestCase):
+    """A marketplace reviewer's second finding, 2026-10-01, by reading the
+    source: index_doc gave every id in a read-along document a copy of all the
+    text beneath it, so ids nested inside one another multiplied. The byte
+    budgets count what is READ and never saw what was MADE.
+
+    Measured before fixing: 400 nested ids around 200 KB held 82 MB, from a
+    file of 0.2 MB -- well inside the 8 MiB per-member budget. Their trace put
+    4,000 ids around 1 MiB at roughly 4 GiB, which is the same line."""
+
+    def doc(self, ids, kb):
+        body = "lorem ipsum dolor sit amet " * (kb * 1024 // 27)
+        inner = "".join('<div id="d%d">' % i for i in range(ids)) + body + "</div>" * ids
+        return ('<html xmlns="http://www.w3.org/1999/xhtml"><body>%s</body></html>'
+                % inner).encode()
+
+    def held(self, found):
+        return sum(len(text) for text, _block in found.values())
+
+    def test_only_the_fragments_asked_for_are_made(self):
+        import booktext
+        data = self.doc(200, 100)
+        everything = booktext.index_doc(data)
+        just_one = booktext.index_doc(data, {"d199"})
+        self.assertEqual(set(just_one), {"d199"})
+        self.assertLess(self.held(just_one), self.held(everything) / 10)
+
+    def test_what_is_made_is_capped_however_it_is_nested(self):
+        import booktext
+        for ids in (200, 400, 1200):
+            found = booktext.index_doc(self.doc(ids, 100))
+            self.assertLessEqual(self.held(found), booktext.MAX_INDEX + (100 << 10),
+                                 "%d nested ids made too much" % ids)
+        self.assertLess(booktext.MAX_INDEX, 64 << 20)     # a ceiling, not a gesture
+
+    def test_a_read_along_still_reads(self):
+        """The cap must not quietly turn read-along off: the fragments a real
+        book asks for are small, and all of them still arrive."""
+        import booktext
+        data = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                '<p id="a">The swallow flew on.</p><p id="b">He was tired.</p>'
+                '</body></html>').encode()
+        found = booktext.index_doc(data, {"a", "b"})
+        self.assertEqual(found["a"][0], "The swallow flew on.")
+        self.assertEqual(found["b"][0], "He was tired.")
+
+
 class BookPlayerPhaseOne(unittest.TestCase):
     """Audiobook player, phase 1 (2026-09-22)."""
 

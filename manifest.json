@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "rushi.songbook",
   "name": "Songbook",
-  "version": "3.18.0",
+  "version": "3.18.1",
   "author": "Rushi Sompura",
   "description": "Music and books for MPD: your folders as queues, world radio, YouTube search and download, audiobooks, and novels read aloud in your own terminal reader.",
   "license": "MIT",

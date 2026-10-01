@@ -45,6 +45,13 @@ MAX_TOTAL = 24 << 20        # everything read out of one EPUB
 MAX_DOCS = 3000             # documents read out of one EPUB
 MAX_BOOK_WORDS = 3000000    # words kept from one book -- what actually grows
 MAX_WORDS = 60000           # about a long chapter; the rest is not sent
+# What the index of one read-along document may MAKE, which is a different
+# thing from what it reads. Every id whose text is kept holds a copy of all the
+# text below it, so ids nested inside one another multiply: 400 nested ids
+# around 200 KB held 82 MB, measured 2026-10-01, from a file of 0.2 MB. The
+# byte budgets above count what comes in and never saw it (found by a
+# marketplace reviewer, reading the source).
+MAX_INDEX = 8 << 20         # characters made while indexing one document
 SIDE = (".lrc", ".srt", ".vtt", ".txt")
 CACHE_DIR = os.path.expanduser("~/.cache/rushi.songbook/text")
 # Bumped whenever the parsing changes, so a saved answer from the older
@@ -286,6 +293,20 @@ def parse_epub(epub, audio_name):
             except Spent:
                 break
             smil_dir = posixpath.dirname(smil_path)
+            # Which fragments this audio file actually asks for, before any
+            # document is indexed: the index then makes only those.
+            need = {}
+            for par in smil.iter(SMIL + "par"):
+                t_el, a_el = par.find(SMIL + "text"), par.find(SMIL + "audio")
+                if t_el is None or a_el is None:
+                    continue
+                name = posixpath.basename(a_el.get("src", "").split("#")[0])
+                if os.path.splitext(name)[0].lower() != want:
+                    continue
+                href, _, piece = t_el.get("src", "").partition("#")
+                if piece:
+                    need.setdefault(
+                        posixpath.normpath(posixpath.join(smil_dir, href)), set()).add(piece)
             for par in smil.iter(SMIL + "par"):
                 text_el = par.find(SMIL + "text")
                 audio_el = par.find(SMIL + "audio")
@@ -298,7 +319,8 @@ def parse_epub(epub, audio_name):
                 doc_path = posixpath.normpath(posixpath.join(smil_dir, doc_href))
                 if doc_path not in docs:
                     try:
-                        docs[doc_path] = index_doc(zip_read(z, doc_path, budget))
+                        docs[doc_path] = index_doc(zip_read(z, doc_path, budget),
+                                                   need.get(doc_path))
                     except Spent:
                         break
                 found = docs[doc_path].get(frag)
@@ -318,18 +340,31 @@ def parse_epub(epub, audio_name):
         return cues
 
 
-def index_doc(data):
-    """id -> (its text, the id of the paragraph-like block it sits in)."""
+def index_doc(data, wanted=None):
+    """id -> (its text, the id of the paragraph-like block it sits in).
+
+    `wanted` is the set of ids the read-along actually asks for. Without it
+    every id in the document was given a copy of all the text beneath it,
+    whether anything ever looked at it or not -- which is most of the cost and
+    all of the amplification. What is made is capped as well, because one
+    wanted id can still sit inside another.
+    """
     tree = ET.fromstring(data)
     parent = {child: el for el in tree.iter() for child in el}
     found = {}
+    made = 0
     for el in tree.iter():
         eid = el.get("id")
-        if not eid:
+        if not eid or (wanted is not None and eid not in wanted):
             continue
         text_ = " ".join("".join(el.itertext()).split())
         if not text_:
             continue
+        made += len(text_)
+        if made > MAX_INDEX:
+            # Keep what is here and stop: a read-along that goes no further is
+            # better than one that takes the machine with it.
+            break
         up = el
         while up is not None and local(up.tag) not in BLOCKS:
             up = parent.get(up)
