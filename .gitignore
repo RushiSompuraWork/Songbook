@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# The development record: findings, measurements and decisions, kept local.
+# It quotes him directly and is written for whoever changes this next, not for
+# whoever installs it (his choice, 2026-10-01).
+REVIEW.md

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "rushi.songbook",
+  "name": "Songbook",
+  "version": "3.16.0",
+  "author": "Rushi Sompura",
+  "description": "Music and books for MPD: your folders as queues, world radio, YouTube search and download, audiobooks, and novels read aloud in your own terminal reader.",
+  "license": "MIT",
+  "homepage": "https://github.com/RushiSompuraWork/Songbook",
+  "repository": "https://github.com/RushiSompuraWork/Songbook.git",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Songbook",
+    "description": "One icon in the bar; a card with your folders, radio, YouTube, audiobooks and books.",
+    "category": "Media",
+    "aliases": [
+      "songbook",
+      "music",
+      "mpd",
+      "player",
+      "queue",
+      "radio",
+      "youtube",
+      "book",
+      "audiobook",
+      "reader",
+      "rmpc"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
