@@ -554,7 +554,7 @@ def lrclib(path, **params):
     req = web.Request(url, headers={"User-Agent": card.USER_AGENT})
     try:
         with web.urlopen(req, timeout=8) as r:
-            return json.load(r)
+            return card.read_json(r)
     except HTTPError as e:
         if e.code == 404:
             return None  # a real "not found"

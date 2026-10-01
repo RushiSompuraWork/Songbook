@@ -414,6 +414,193 @@ class Watcher(unittest.TestCase):
         self.assertEqual(view["playError"], "got HTTP status 403")
 
 
+class WhatAStrangerFaces(unittest.TestCase):
+    """2026-10-01, before publishing. On his own machine the files and the
+    network are his. On somebody else's they are not: the books come from
+    anywhere, the stations and the lyrics and the dictionary are other
+    people's servers, and the machine may have other people on it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (card.STATE_DIR, card.load, card.save)
+        card.STATE_DIR = os.path.join(self.tmp.name, "state")
+        card.load, card.save = Settings.real_load, Settings.real_save
+
+    def tearDown(self):
+        card.STATE_DIR, card.load, card.save = self.saved
+        self.tmp.cleanup()
+
+    # -- a server that answers with too much
+
+    class Answer:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self, n):
+            return self.data[:n]
+
+    def test_a_web_answer_is_read_with_a_ceiling(self):
+        """json.load(r) reads whatever the far end sends. The station
+        directory, the lyrics server and the dictionary are other people's
+        machines; one answering with a gigabyte would have been held whole in
+        the memory of whoever installed this. Measured the same day: the
+        largest real answer is a 200-station search at 234 KB."""
+        self.assertEqual(card.read_json(self.Answer(b'{"a": 1}')), {"a": 1})
+        huge = self.Answer(b"[" + b"0," * 5_000_000 + b"0]")
+        with self.assertRaises(ValueError):
+            card.read_json(huge)
+        self.assertGreater(card.MOST_ANSWER, 1 << 20)     # room for a real answer
+        self.assertLess(card.MOST_ANSWER, 64 << 20)       # and still a ceiling
+        # Every network answer is bounded. Checked where it matters -- at
+        # each urlopen -- not by searching for "json.load", which also reads
+        # local cache files perfectly safely, and which appears in this
+        # helper's own docstring describing what it replaced.
+        import glob
+        import re as _re
+        for path in sorted(glob.glob(os.path.join(HERE, "..", "scripts", "*.py"))):
+            lines = open(path).read().splitlines()
+            for n, line in enumerate(lines):
+                if "urlopen(" not in line:
+                    continue
+                # The whole statement, not three lines: the resumable
+                # downloader opens the connection and reads it in 1 MB blocks
+                # further down, which is bounded and streams to disk.
+                near = " ".join(lines[n:n + 25])
+                bounded = ("read_json(" in near
+                           or _re.search(r"\.read\(\s*[^)\s]", near)
+                           or "copyfileobj" in near)
+                self.assertTrue(bounded, "%s:%d reads a web answer without a ceiling: %s"
+                                % (os.path.basename(path), n + 1, line.strip()))
+
+    # -- a book that tries to drive the terminal
+
+    def test_nothing_drawn_can_drive_the_terminal(self):
+        """A book's words were already cleaned. Its title was not, and a title
+        comes from a file's name -- which whoever sent the file chose. A book
+        called "quiet\x1b]0;OWNED\x07.txt" retitled the window when it opened.
+        It is cleaned where the screen is written now, so a row drawn somewhere
+        new cannot forget."""
+        import reader
+        nasty = "a\x1b]0;OWNED\x07b\x07c\u202ed\x9bE"
+        self.assertNotIn("\x1b", reader.safe(nasty))
+        self.assertNotIn("\x07", reader.safe(nasty))
+        self.assertNotIn("\u202e", reader.safe(nasty))   # reads other than it is
+        self.assertNotIn("\x9b", reader.safe(nasty))     # the one-byte CSI
+        self.assertEqual(reader.safe("plain words"), "plain words")
+        self.assertIn("\u2500", reader.safe("\u2500"))   # box drawing still drawn
+        scr = reader.TextScreen(4, 40)
+        scr.put(0, 0, nasty, "")
+        self.assertNotIn("\x1b", scr.text())
+        # and through a whole book opened by its hostile name
+        import booktext
+        saved = booktext.CACHE_DIR
+        booktext.CACHE_DIR = os.path.join(self.tmp.name, "c")
+        try:
+            path = os.path.join(self.tmp.name, "quiet\x1b]0;OWNED\x07book.txt")
+            with open(path, "w") as f:
+                f.write("Chapter 1\n\nThe swallow flew on and was very tired indeed.\n")
+            _app, screen = reader.render("60x12", "", path)
+            self.assertNotIn("\x1b", screen.text())
+            self.assertNotIn("\x07", screen.text())
+        finally:
+            booktext.CACHE_DIR = saved
+
+    # -- a machine with other people on it
+
+    def test_what_he_read_is_not_readable_by_other_users(self):
+        """library.json holds every book and where he stopped, meanings.json
+        every word looked up, stars and played what he listens to. They were
+        644 and the folder 755, from the system's umask rather than anybody's
+        decision."""
+        import stat
+        card.save("probe.json", {"a": 1})
+        folder = stat.S_IMODE(os.stat(card.STATE_DIR).st_mode)
+        f = stat.S_IMODE(os.stat(os.path.join(card.STATE_DIR, "probe.json")).st_mode)
+        self.assertFalse(folder & 0o077, "others can reach the folder: %o" % folder)
+        self.assertFalse(f & 0o077, "others can read the file: %o" % f)
+        # A file that is not ours keeps the mode it had: mpd.conf is read by
+        # MPD, and tightening somebody else's file is not ours to do.
+        outside = os.path.join(self.tmp.name, "elsewhere.conf")
+        with open(outside, "w") as fh:
+            fh.write("x")
+        os.chmod(outside, 0o644)
+        card.write_file(outside, "y")
+        self.assertEqual(stat.S_IMODE(os.stat(outside).st_mode), 0o644)
+
+    # -- books from anywhere
+
+    def test_a_hostile_book_is_read_without_eating_the_machine(self):
+        """Checked by building the files and reading them, 2026-10-01: an
+        entity bomb, an external entity, a 1 GB entry, 5000 chapters, and a
+        traversal name. The control is a valid book, so a parser that quietly
+        refused everything could not pass this."""
+        import zipfile
+        import booktext
+        saved = booktext.CACHE_DIR
+        booktext.CACHE_DIR = os.path.join(self.tmp.name, "c")
+        CONT = ('<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:'
+                'opendocument:xmlns:container"><rootfiles><rootfile '
+                'full-path="c.opf"/></rootfiles></container>')
+
+        def opf(hrefs):
+            items = "".join('<item id="i%d" href="%s" media-type="application/xhtml+xml"/>'
+                            % (n, h) for n, h in enumerate(hrefs))
+            spine = "".join('<itemref idref="i%d"/>' % n for n in range(len(hrefs)))
+            return ('<package xmlns="http://www.idpf.org/2007/opf"><manifest>%s</manifest>'
+                    '<spine>%s</spine></package>' % (items, spine))
+
+        real = "The swallow flew on and on, and was very tired indeed. " * 5
+
+        def book(name, files):
+            path = os.path.join(self.tmp.name, name + ".epub")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                for n, d in files:
+                    z.writestr(n, d)
+            try:
+                return booktext.epub_book(path)
+            except Exception:
+                return None
+        try:
+            # the control: a real book opens, or nothing below means anything
+            good = book("good", [("META-INF/container.xml", CONT), ("c.opf", opf(["a.html"])),
+                                 ("a.html", "<html><body><p>%s</p></body></html>" % real)])
+            self.assertTrue(good and good["chapters"], "the control must open")
+
+            bomb = ('<?xml version="1.0"?><!DOCTYPE t [<!ENTITY a "AAAAAAAAAA">'
+                    '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">'
+                    '<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">'
+                    '<!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">'
+                    '<!ENTITY e "&d;&d;&d;&d;&d;&d;&d;&d;&d;&d;">]>'
+                    '<html><body><p>&e; %s</p></body></html>' % real)
+            started = time.time()
+            book("bomb", [("META-INF/container.xml", CONT), ("c.opf", opf(["a.html"])),
+                          ("a.html", bomb)])
+            self.assertLess(time.time() - started, 10)      # it does not expand
+
+            xxe = ('<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM '
+                   '"file:///etc/passwd">]><html><body><p>&x; %s</p></body></html>' % real)
+            got = book("xxe", [("META-INF/container.xml", CONT), ("c.opf", opf(["a.html"])),
+                               ("a.html", xxe)])
+            self.assertNotIn("root:", json.dumps(got["chapters"]))   # nothing read off disk
+
+            big = book("big", [("META-INF/container.xml", CONT), ("c.opf", opf(["a.html"])),
+                               ("a.html", "<html><body><p>%s</p></body></html>" % ("A" * (1 << 28)))])
+            self.assertFalse(big and big["chapters"])       # one entry too large: refused
+
+            many = book("many", [("META-INF/container.xml", CONT),
+                                 ("c.opf", opf(["d%d.html" % i for i in range(4000)]))]
+                        + [("d%d.html" % i, "<html><body><p>%s</p></body></html>" % real)
+                           for i in range(4000)])
+            self.assertLessEqual(len(many["chapters"]), booktext.MAX_DOCS)
+
+            escape = os.path.join(self.tmp.name, "escaped.html")
+            book("out", [("META-INF/container.xml", CONT), ("c.opf", opf(["../../escaped.html"])),
+                         ("../../escaped.html", "<html><body><p>%s</p></body></html>" % real)])
+            self.assertFalse(os.path.exists(escape))        # read from the zip, never to disk
+        finally:
+            booktext.CACHE_DIR = saved
+
+
 class BeatReader(unittest.TestCase):
     def test_garbage_audio_does_not_crash(self):
         import array

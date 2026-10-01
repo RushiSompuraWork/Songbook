@@ -137,12 +137,23 @@ def write_file(path, data, precious=False, follow=False):
         something to write through;
       - `precious`: the bytes are on disk before the name changes, the folder
         entry too, and the file it replaces is kept as .bak;
-      - a write that does not finish takes its temporary file with it.
+      - a write that does not finish takes its temporary file with it;
+      - a new file under our own folder is readable by its owner and nobody
+        else. What is kept there is what he read, what he listened to and
+        every word he looked up, and the umask that made these 644 is the
+        system's, not a decision anybody took (found 2026-10-01, going
+        through what changes when a stranger runs this on a shared machine).
     """
     if follow and os.path.islink(path):
         path = os.path.realpath(path)
     folder = os.path.dirname(path) or "."
     os.makedirs(folder, exist_ok=True)
+    mine = os.path.realpath(folder).startswith(os.path.realpath(STATE_DIR))
+    if mine:
+        try:
+            os.chmod(folder, 0o700)    # others cannot even list it
+        except OSError:
+            pass
     tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
     binary = isinstance(data, (bytes, bytearray))
     try:
@@ -157,6 +168,8 @@ def write_file(path, data, precious=False, follow=False):
                 os.fsync(f.fileno())
         if mode is not None:
             os.chmod(tmp, mode)
+        elif mine:
+            os.chmod(tmp, 0o600)       # a new file of ours: the owner only
         if precious and os.path.exists(path):
             try:
                 os.replace(path, path + ".bak")
@@ -346,6 +359,28 @@ def song_view(rec, titles):
 
 # ---------------------------------------------------------------- radio
 
+MOST_ANSWER = 8 << 20           # what any web answer may be, read into memory
+
+
+def read_json(r, most=MOST_ANSWER):
+    """A web answer, with a ceiling on how much of it is believed.
+
+    `json.load(r)` reads whatever the far end chooses to send. The station
+    directory, the lyrics server and the dictionary are other people's
+    machines, and a hostile or broken one answering with a gigabyte would be
+    held in memory in full -- on the machine of whoever installed this, not
+    mine (found 2026-10-01, going through what changes when strangers run it).
+
+    Measured the same day: the largest real answer is a 200-station search at
+    234 KB, lyrics 57 KB, a word 10 KB. Eight megabytes is thirty-five times
+    the largest and still a ceiling.
+    """
+    raw = r.read(most + 1)
+    if len(raw) > most:
+        raise ValueError("the answer was larger than %d bytes; not reading it" % most)
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
 def radio_hosts():
     hosts = []
     try:
@@ -381,7 +416,7 @@ def radio(path, **params):
         req = web.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with web.urlopen(req, timeout=6) as r:
-                return json.load(r)
+                return read_json(r)
         except Exception as e:
             last = e
     # Keep the message human: "[Errno -2] Name or service not known" means

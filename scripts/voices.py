@@ -581,7 +581,7 @@ def fetch_python():
     import urllib.request
     say_install("python", "This system's Python is too new for the voice; getting a 3.12…")
     with urllib.request.urlopen(PY_RELEASES, timeout=30) as r:
-        release = json.load(r)
+        release = card.read_json(r)
     kind = py_kind()
     asset = next((a for a in release.get("assets", [])
                   if PY_WANT in a["name"] and a["name"].endswith(kind)), None)

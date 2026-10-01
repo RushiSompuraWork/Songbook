@@ -2163,6 +2163,22 @@ class Reader:
 
 # ---------------------------------------------------------------- screens
 
+def safe(text):
+    """Nothing reaches the terminal that can drive it.
+
+    `booktext.clean` already does this to a book's words. What it never saw is
+    everything else drawn beside them: a title taken from a file's name, a
+    chapter name, a song's tags, a message. Those come from whoever made the
+    file, and a book called "quiet\x1b]0;...\x07.txt" retitled the window the
+    moment the reader opened it -- found 2026-10-01, going through what
+    changes when a stranger runs this.
+
+    It is done here, where the screen is written, because that is the one way
+    in: a new row drawn somewhere else cannot forget it.
+    """
+    return booktext.CONTROL.sub("", text) if text else text
+
+
 class CursesScreen:
     def __init__(self, win):
         self.win = win
@@ -2180,7 +2196,8 @@ class CursesScreen:
         if not 0 <= y < rows or x >= cols or x < 0:
             return
         try:
-            self.win.addnstr(y, x, text, max(0, cols - x - (1 if y == rows - 1 else 0)),
+            self.win.addnstr(y, x, safe(text),
+                             max(0, cols - x - (1 if y == rows - 1 else 0)),
                              self.styles.get(style, 0))
         except curses.error:
             pass
@@ -2200,7 +2217,7 @@ class TextScreen:
     def put(self, y, x, text, style):
         if not 0 <= y < self.rows:
             return
-        for i, c in enumerate(text):
+        for i, c in enumerate(safe(text)):
             if 0 <= x + i < self.cols:
                 self.grid[y][x + i] = c
                 self.marks[y][x + i] = style

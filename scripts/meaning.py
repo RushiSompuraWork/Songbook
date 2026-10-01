@@ -134,7 +134,7 @@ def from_web(word, lang):
     url = API % (lang, urllib.parse.quote(word))
     req = web.Request(url, headers={"User-Agent": card.USER_AGENT})
     with web.urlopen(req, timeout=WEB_TIMEOUT) as r:
-        data = json.load(r)
+        data = card.read_json(r)
     out = []
     for entry in (data.get("entries") or [])[:6]:
         part = str(entry.get("partOfSpeech") or "")[:24]
