@@ -11,6 +11,16 @@ plays through MPD.
 
 [rmpc]: https://github.com/mierak/rmpc
 
+<p align="center">
+  <img src="docs/images/01-home-library.png" alt="The card: now playing, a search box, and your music folders" width="420">
+  &nbsp;
+  <img src="docs/images/04-books-shelf.png" alt="A Book folder opened as a shelf, each book with how far through it is" width="420">
+</p>
+
+<p align="center">
+  <img src="docs/images/09-reader-chapter.png" alt="The terminal reader, a chapter of a novel with a chapter being read aloud" width="860">
+</p>
+
 ## Install
 
 Needs Omarchy with the Quattro shell, a running MPD, and:
@@ -77,6 +87,11 @@ station, dimmed when nothing plays. Hover for the title.
 
 ## The card
 
+<p align="center">
+  <img src="docs/images/02-audiobook-playing.png" alt="An audiobook playing, with its chapters and how far through each one is" width="400">
+  <img src="docs/images/07-what-the-card-is-doing.png" alt="Everything the card is busy with, in one place" width="400">
+</p>
+
 Now playing, the playback buttons with **☾ sleep** at the left and **⚙
 settings** at the right, one search box with the view icons beside it, and
 one list below.
@@ -139,6 +154,11 @@ one list below.
   next would end the book), each chapter where it was left. While a book
   plays, the title is the chapter and the artist the book; inside one
   `.m4b` the time bar is the chapter's, not the whole file's.
+<p align="center">
+  <img src="docs/images/06-reading-aloud-chapter-list.png" alt="Chapters ticked to be read aloud, one being made" width="400">
+  <img src="docs/images/14-settings-read-aloud.png" alt="Settings: which voice engine, which voice, and how hard it works" width="400">
+</p>
+
 - **Reading a novel aloud** (`scripts/voices.py`, `scripts/speak.py`): press
   p on a novel in the reader. Its chapter is spoken sentence by sentence by
   whichever engine is installed, joined into one MP3 with a timed `.lrc`
@@ -213,6 +233,11 @@ one list below.
   (Settings → Playback; with the fade on, a chapter-end sleep starts it
   10 s early so the sound is gone as the chapter ends).
   `omarchy-shell songbook sleep` steps the sleep timer, for a key binding.
+<p align="center">
+  <img src="docs/images/12-read-along-text.png" alt="Reading along: the spoken sentence highlighted as it plays" width="400">
+  <img src="docs/images/05-novel-chapters-ticked.png" alt="A novel's chapters, with what has been read and heard" width="400">
+</p>
+
 - **Reading along** (the Lyrics view, ♪): a book's text, or a song's own
   words kept beside it, shows while it plays, as paragraphs. Sources, first
   found wins: a file beside the audio with the same name (`.lrc`, also with
@@ -303,6 +328,33 @@ play next, Ctrl+Enter to add to the end, Alt+Space star, Ctrl+Space download
 (the selected YouTube row, or else the song playing now), Space play/pause,
 Delete / Alt+↑/↓ / Ctrl+Delete in Up next, Esc to go back or close, `?` for
 the full list, where each can be changed.
+
+## Radio and YouTube
+
+<p align="center">
+  <img src="docs/images/15-world-radio.png" alt="World radio by genre and country" width="400">
+  <img src="docs/images/13-search-stations-and-youtube.png" alt="One search box: stations and YouTube together" width="400">
+</p>
+
+Search once and the box answers with both: stations from Radio Browser and
+videos from YouTube. 󰐹 beside a station is its speed, tested in the
+background and kept; the World page groups everything by genre and country,
+and Discover tries a handful from different countries and keeps the fast ones.
+
+<p align="center">
+  <img src="docs/images/03-radio.png" alt="A station playing, with the song it is sending" width="400">
+</p>
+
+## The reader, closer up
+
+<p align="center">
+  <img src="docs/images/08-reader-opening.png" alt="The reader opening on a book" width="430">
+  <img src="docs/images/11-reader-word-meaning.png" alt="A word chosen in the text, with what it means" width="430">
+</p>
+
+<p align="center">
+  <img src="docs/images/10-reader-chapter-panel.png" alt="The chapter list inside the reader" width="860">
+</p>
 
 ## How it works
 
