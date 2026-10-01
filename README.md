@@ -520,6 +520,11 @@ On the widget entry in `~/.config/omarchy/shell.json`:
 | `youtubeIcon` | 󰗃     | Bar glyph for YouTube     |
 | `bookIcon`  | 󰂺       | Bar glyph for an audiobook |
 
+## Security
+
+What it does to stay out of trouble, and how to report anything it does not:
+[SECURITY.md](SECURITY.md). Reporters are credited in [CREDITS.md](CREDITS.md).
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE). In short: use it, change it, ship it, sell it —
