@@ -557,13 +557,44 @@ def public_host(host):
         return False
 
 
-def pinned_get(url, timeout, hops=3):
+def pinned_get(url, timeout, hops=3, headers=None):
     """A GET that connects to an address checked a moment before, by number,
     while telling the far end the name it wanted -- so the certificate is
     still checked against the name. Redirects are followed by hand, each one
     checked the same way. Returns the open response; the caller closes it."""
     import http.client
     import ssl
+
+    class IcyLine:
+        """Shoutcast answers "ICY 200 OK" where HTTP says "HTTP/1.0 200 OK",
+        and http.client refuses the line outright. MPD's own fetching accepts
+        it, so refusing it here would have taken working stations away:
+        measured 2026-10-01, 2 of 22 real stations answer this way. Only the
+        first line is touched, and only when it starts with ICY."""
+
+        def __init__(self, fp):
+            self.fp, self.first = fp, True
+
+        def readline(self, *a):
+            line = self.fp.readline(*a)
+            if self.first:
+                self.first = False
+                if line[:4] == b"ICY ":
+                    line = b"HTTP/1.0 " + line[4:]
+            return line
+
+        def __getattr__(self, name):
+            return getattr(self.fp, name)
+
+    class IcySocket:
+        def __init__(self, sock):
+            self.sock = sock
+
+        def makefile(self, *a, **kw):
+            return IcyLine(self.sock.makefile(*a, **kw))
+
+        def __getattr__(self, name):
+            return getattr(self.sock, name)
 
     class PinnedHTTPS(http.client.HTTPSConnection):
         def __init__(self, name, address, port, **kw):
@@ -583,7 +614,8 @@ def pinned_get(url, timeout, hops=3):
             self.address = address
 
         def connect(self):
-            self.sock = socket.create_connection((self.address, self.port), self.timeout)
+            self.sock = IcySocket(
+                socket.create_connection((self.address, self.port), self.timeout))
 
     seen = url
     for _hop in range(hops + 1):
@@ -602,9 +634,9 @@ def pinned_get(url, timeout, hops=3):
             try:
                 # Host comes from the name, not the number, as http.client
                 # builds it, so the far end sees the name it is known by.
-                conn.request("GET", path, headers={"User-Agent": USER_AGENT,
-                                                   "Icy-MetaData": "0",
-                                                   "Accept": "*/*"})
+                sending = {"User-Agent": USER_AGENT, "Icy-MetaData": "0", "Accept": "*/*"}
+                sending.update(headers or {})
+                conn.request("GET", path, headers=sending)
                 r = conn.getresponse()
                 break
             except OSError as e:
@@ -621,6 +653,7 @@ def pinned_get(url, timeout, hops=3):
             seen = urllib.parse.urljoin(seen, where)
             continue          # and the next address is checked in its turn
         r.conn = conn         # so the caller can hang up on both
+        r.seen = seen         # where it ended up, after any redirects
         return r
     raise PermissionError("too many redirects")
 
@@ -1095,6 +1128,171 @@ def fetch_piece(entry, start, end):
     return r, total
 
 
+# ---------------------------------------------------------------- radio relay
+#
+# Stations come from Radio Browser, which anyone can add to, and the address
+# check in playable_station only governs the url the card hands over. MPD then
+# fetches it itself, and MPD's curl input follows redirects: a station on a
+# public address could answer "302, go to http://127.0.0.1:…" and MPD would
+# ask a service inside this machine. Reported by a marketplace reviewer
+# 2026-10-01 and reproduced here -- a local server was asked six times.
+#
+# So MPD is never given the station. It is given a address on this machine,
+# and the fetching happens here, where every hop of every redirect is checked
+# against the same rule. There is nothing left for a station to redirect.
+#
+# The station's own metadata passes straight through, so the song name a
+# station sends (MPD reads it as the title) still arrives.
+
+RADIO_MAP = "radio-relay.json"
+RADIO_TIMEOUT = 20
+MOST_STATIONS = 300
+# What belongs to one connection and must not be passed on as if it were the
+# station's; the body is already un-chunked by http.client when it reaches us.
+NOT_FORWARDED = {"transfer-encoding", "content-length", "connection",
+                 "keep-alive", "proxy-authenticate", "proxy-authorization",
+                 "te", "trailer", "upgrade"}
+
+
+def station_token(url):
+    """A name for this station on the relay. From the url, so the same
+    station keeps the same one and a queue still works after a restart."""
+    return hashlib.sha1(url.encode("utf-8", "replace")).hexdigest()[:20]
+
+
+def station_stream(url):
+    """The address to give MPD for this station, or "" when the relay is not
+    there. Never the station's own url: that is the whole point."""
+    base = relay_address()
+    if not base:
+        return ""
+    token = station_token(url)
+    kept = load(RADIO_MAP, {})
+    kept[token] = url
+    if len(kept) > MOST_STATIONS:
+        kept = dict(list(kept.items())[-MOST_STATIONS:])
+    save(RADIO_MAP, kept)
+    return "%s/radio/%s" % (base, token)
+
+
+# A station is often a playlist -- 4 of 45 real ones measured 2026-10-01, and
+# they are BBC Radio 4, France Inter, RTL and ABC Classic, not oddities. MPD
+# reads the playlist and then fetches what is inside it, so passing one through
+# untouched would hand those requests straight back to MPD and leave the same
+# hole open through a playlist instead of a redirect. Every address inside is
+# rewritten to come back here. HLS segments change every few seconds, so their
+# names are kept in memory rather than written to a file.
+PLAYLISTS = ("mpegurl", "scpls", "x-scpls", "vnd.apple.mpegurl")
+# Only these are .pls keys. Anything else with an "=" in it is a name, and an
+# HLS segment often has one: BBC Radio 4's are "…-audio=96000.norewind.m3u8",
+# which a looser rule passed through untouched -- so MPD would have fetched
+# them itself after all (found by testing it, 2026-10-01).
+PLS_FILE = re.compile(r"(?i)^file\d*\s*=")
+PLS_OTHER = re.compile(r"(?i)^(\[playlist\]|(title|length|numberofentries|version)\d*\s*=)")
+MOST_PIECES = 4000
+PLAYLIST_BYTES = 4 << 20
+_pieces = {}
+_pieces_lock = threading.Lock()
+
+
+def remember_piece(url):
+    token = station_token(url)
+    with _pieces_lock:
+        if len(_pieces) > MOST_PIECES:
+            _pieces.clear()          # they are seconds old; losing them costs a refetch
+        _pieces[token] = url
+    return token
+
+
+def station_of(token):
+    url = load(RADIO_MAP, {}).get(token)
+    if isinstance(url, str) and url:
+        return url
+    with _pieces_lock:
+        return _pieces.get(token)
+
+
+def playlist_through_us(text, base, here):
+    """A playlist with every address in it pointing back at this relay."""
+    def mine(target):
+        where = urllib.parse.urljoin(base, target.strip())
+        if urllib.parse.urlparse(where).scheme not in ("http", "https"):
+            return target            # not something MPD would fetch over the network
+        return "%s/radio/%s" % (here, remember_piece(where))
+
+    out = []
+    for line in text.splitlines(True):
+        bare = line.strip()
+        if not bare:
+            out.append(line)
+        elif bare.startswith("#"):
+            # #EXT-X-KEY and #EXT-X-MAP carry addresses of their own.
+            out.append(re.sub(r'URI="([^"]+)"',
+                              lambda m: 'URI="%s"' % mine(m.group(1)), line))
+        elif PLS_FILE.match(bare):
+            key, _, value = bare.partition("=")      # a .pls entry: File1=…
+            out.append("%s=%s\n" % (key, mine(value)))
+        elif PLS_OTHER.match(bare):
+            out.append(line)                          # .pls Title1=, Length1=, [playlist]
+        else:
+            out.append(mine(bare) + "\n")
+    return "".join(out)
+
+
+def seen_url(r, asked):
+    """Where the answer actually came from, so relative names inside a
+    playlist are resolved against the right place after any redirect."""
+    return getattr(r, "seen", None) or asked
+
+
+def radio_serve(handler, token, send_body):
+    """Answer MPD's request for one station, fetching it ourselves."""
+    url = station_of(token)
+    if not isinstance(url, str) or not url:
+        handler.send_error(404)
+        return
+    asked = (handler.headers.get("Icy-MetaData") or "0").strip()
+    r = pinned_get(url, RADIO_TIMEOUT,
+                   headers={"Icy-MetaData": "1" if asked == "1" else "0"})
+    try:
+        kind = (r.getheader("Content-Type") or "").split(";")[0].strip().lower()
+        here = relay_address() or "http://127.0.0.1:%d" % handler.server.server_address[1]
+        listing = None
+        if any(k in kind for k in PLAYLISTS):
+            listing = playlist_through_us(
+                r.read(PLAYLIST_BYTES).decode("utf-8", "replace"), seen_url(r, url), here)
+        handler.send_response(r.status)
+        for name, value in r.getheaders():
+            if name.lower() not in NOT_FORWARDED:
+                handler.send_header(name, value)
+        if listing is not None:
+            body = listing.encode("utf-8")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            if send_body:
+                handler.wfile.write(body)
+            return
+        # No length and no chunking: the stream ends when the connection does,
+        # which is what a station is.
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        if not send_body:
+            return
+        while True:
+            block = r.read(32 << 10)
+            if not block:
+                break
+            handler.wfile.write(block)
+    finally:
+        handler.close_connection = True
+        try:
+            r.close()
+            r.conn.close()
+        except Exception:
+            pass
+
+
 def relay_serve(handler, vid, send_body):
     """Answer one request from MPD for video `vid`."""
     watch = "https://www.youtube.com/watch?v=" + vid
@@ -1169,14 +1367,18 @@ def start_relay():
 
         def answer(self, send_body):
             m = re.match(r"^/yt/([A-Za-z0-9_-]{11})$", self.path)
-            if not m:
+            station = re.match(r"^/radio/([0-9a-f]{20})$", self.path)
+            if not m and not station:
                 self.send_error(404)
                 return
             if not slots.acquire(blocking=False):
                 self.send_error(503)
                 return
             try:
-                relay_serve(self, m.group(1), send_body)
+                if station:
+                    radio_serve(self, station.group(1), send_body)
+                else:
+                    relay_serve(self, m.group(1), send_body)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # MPD skipped, seeked or stopped
             except Exception:
@@ -2111,6 +2313,12 @@ def cmd_play_station(station_json, mode="replace", list_json=""):
     if not playable_station(s):
         fail("Not a radio stream: " + str(s.get("url", ""))[:80])
     check_arg(s["url"])
+    # MPD is never handed the station itself; see "radio relay" above. Without
+    # the relay there is no safe way to play one, so it says so rather than
+    # quietly going back to letting MPD follow the station's redirects.
+    if not relay_address():
+        fail("Radio needs the card's own connection, which is not running. "
+             "Restart the shell and try again.")
     group = [s]
     if mode == "replace" and list_json:
         try:
@@ -2129,17 +2337,23 @@ def cmd_play_station(station_json, mode="replace", list_json=""):
             if x["url"] in seen:
                 continue
             seen.add(x["url"])
-            song_id = m.dict("addid", check_arg(x["url"])).get("Id")
+            through = station_stream(x["url"])
+            if not through:
+                continue
+            song_id = m.dict("addid", check_arg(through)).get("Id")
             if x["url"] == s["url"]:
                 chosen = song_id
         if chosen:
             m.raw("playid", chosen)
     else:
-        add_at(m, s["url"], mode)
+        add_at(m, station_stream(s["url"]), mode)
     m.close()
     names = {} if mode == "replace" else load("radio-queue.json", {})
     for x in group:
-        names[x["url"]] = {"name": str(x.get("name", ""))[:120], "uuid": x.get("uuid", "")}
+        # Keyed by what is in the queue -- the relay address -- because that
+        # is what comes back when the card asks MPD what is playing.
+        names[station_stream(x["url"])] = {"name": str(x.get("name", ""))[:120],
+                                           "uuid": x.get("uuid", "")}
     save("radio-queue.json", names)
     if mode == "replace":
         save("last.json", {"type": "station", "station": s, "title": s["name"]})

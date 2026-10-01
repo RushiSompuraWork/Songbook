@@ -95,11 +95,16 @@ class StationUrls(unittest.TestCase):
         card.load = lambda name, default: default
         # No real DNS in tests: radio.example stands for the public internet.
         card.public_host = lambda host: host == "radio.example"
-        with Silent() as buf:
-            try:
-                card.cmd_play_station(json.dumps({"name": "x", "url": url}))
-            except SystemExit:
-                pass
+        was = card.relay_address
+        card.relay_address = lambda: "http://127.0.0.1:9999"
+        try:
+            with Silent() as buf:
+                try:
+                    card.cmd_play_station(json.dumps({"name": "x", "url": url}))
+                except SystemExit:
+                    pass
+        finally:
+            card.relay_address = was
         return fake.sent, buf.getvalue()
 
     def test_only_http_streams_are_played(self):
@@ -117,9 +122,40 @@ class StationUrls(unittest.TestCase):
             self.assertEqual(sent, [], url)
             self.assertIn("error", answer, url)
 
-    def test_normal_station_plays(self):
+    def test_normal_station_plays_and_mpd_never_gets_the_station_itself(self):
+        """A marketplace reviewer's finding, 2026-10-01, reproduced here: MPD
+        follows redirects itself, so handing it a station that passed the
+        address check meant a station could answer "302, go to 127.0.0.1" and
+        MPD would ask a service inside the machine. It is handed the card's
+        own address now, and the fetching happens where every hop is checked."""
         sent, _ = self.play("https://radio.example/stream")
         self.assertTrue(any("addid" in s for s in sent))
+        added = " ".join(sent)
+        self.assertNotIn("radio.example", added)      # never the station
+        self.assertIn("127.0.0.1:9999/radio/", added)  # always by way of the relay
+
+    def test_a_station_is_refused_when_the_relay_is_not_there(self):
+        """Falling back to the station's own url would be falling back to the
+        hole: MPD would follow its redirects again."""
+        fake = FakeMpd()
+        card.mpd = lambda: fake
+        card.count_click = lambda uuid: None
+        card.save = lambda *a, **k: None
+        card.load = lambda name, default: default
+        card.public_host = lambda host: host == "radio.example"
+        was = card.relay_address
+        card.relay_address = lambda: ""
+        try:
+            with Silent() as buf:
+                try:
+                    card.cmd_play_station(json.dumps({"name": "x",
+                                                      "url": "https://radio.example/s"}))
+                except SystemExit:
+                    pass
+        finally:
+            card.relay_address = was
+        self.assertEqual(fake.sent, [])
+        self.assertIn("error", buf.getvalue())
 
     def test_station_inside_this_network_is_refused(self):
         # A listing pointing at the router, MPD itself or the YouTube relay.
@@ -3140,14 +3176,16 @@ class RadioNextPrevious(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         card.STATE_DIR = self.tmp.name
         card.load, card.save = Settings.real_load, Settings.real_save
-        self.saved = (card.mpd, card.count_click, card.public_host)
+        self.saved = (card.mpd, card.count_click, card.public_host, card.relay_address)
         self.m = self.Q()
         card.mpd = lambda: self.m
         card.count_click = lambda uuid: None
         card.public_host = lambda host: host.endswith(".example")
+        card.relay_address = lambda: "http://127.0.0.1:9999"
 
     def tearDown(self):
-        card.mpd, card.count_click, card.public_host = self.saved
+        (card.mpd, card.count_click, card.public_host,
+         card.relay_address) = self.saved
         self.tmp.cleanup()
 
     def play(self, chosen, listed):
@@ -3162,10 +3200,14 @@ class RadioNextPrevious(unittest.TestCase):
         listed = [{"url": "https://%s.example/s" % n, "name": n} for n in ("a", "b", "c")]
         self.play(listed[1], listed)
         added = [c[1] for c in self.m.cmds if c[0] == "addid"]
-        self.assertEqual(added, [s["url"] for s in listed])
+        # The queue holds the card's own addresses, in the order given, and
+        # never the stations themselves: MPD must not fetch one (2026-10-01).
+        self.assertEqual(added, [card.station_stream(x["url"]) for x in listed])
+        for x in listed:
+            self.assertNotIn(x["url"], " ".join(added))
         self.assertIn(("playid", "2"), self.m.cmds)
         self.assertEqual(self.m.cmds[0], ("clear",))
-        self.assertEqual(card.station_name("https://c.example/s"), "c")
+        self.assertEqual(card.station_name(card.station_stream("https://c.example/s")), "c")
 
     def test_dead_and_private_stations_are_left_out(self):
         card.save("quality.json", {"https://dead.example/s": {"tier": "bad", "at": time.time()}})
@@ -3176,13 +3218,15 @@ class RadioNextPrevious(unittest.TestCase):
                   {"url": "https://b.example/s", "name": "b"}]
         self.play(listed[0], listed)
         added = [c[1] for c in self.m.cmds if c[0] == "addid"]
-        self.assertEqual(added, ["https://a.example/s", "https://b.example/s"])
+        self.assertEqual(added, [card.station_stream("https://a.example/s"),
+                                 card.station_stream("https://b.example/s")])
 
     def test_a_tier_from_the_caller_is_not_trusted(self):
         listed = [{"url": "https://a.example/s", "name": "a"},
                   {"url": "http://10.0.0.1/s", "name": "lan", "tier": "good"}]
         self.play(listed[0], listed)
-        self.assertEqual([c[1] for c in self.m.cmds if c[0] == "addid"], ["https://a.example/s"])
+        self.assertEqual([c[1] for c in self.m.cmds if c[0] == "addid"],
+                         [card.station_stream("https://a.example/s")])
 
     def test_without_a_list_one_station(self):
         with Silent():
@@ -3203,7 +3247,8 @@ class RadioNextPrevious(unittest.TestCase):
             def dict(self, cmd, *args):
                 if cmd == "status":
                     return {"state": "play", "song": "1", "playlistlength": "2"}
-                return {"file": "https://b.example/s", "Name": "ICY name"}
+                return {"file": card.station_stream("https://b.example/s"),
+                        "Name": "ICY name"}
         view = card.status_view(S())
         self.assertEqual((view["kind"], view["station"]), ("radio", "B"))
 

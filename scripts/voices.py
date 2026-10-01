@@ -604,22 +604,40 @@ def fetch_python():
             break
     if not want:
         raise RuntimeError("that Python build is not in the published checksums")
+    # Kept where it can be found again, not in a folder that disappears.
+    # This was downloaded into a TemporaryDirectory, so a connection that
+    # dropped at 60 of 67 MB threw all of it away and the next try started at
+    # zero -- on exactly the stage most likely to fail, while the message said
+    # "it carries on from where it stopped". It uses the same resuming
+    # downloader as the model now (his report, 2026-10-01: the install failed
+    # twice on a slow link, once with no DNS and once timed out).
+    keep = os.path.dirname(PY_DIR)
+    os.makedirs(keep, exist_ok=True)
+    tar = os.path.join(keep, "python.tar.gz")
+    fetch_one(asset["browser_download_url"], tar, "python", "Python 3.12",
+              in_words(asset.get("size") or 0))
     with tempfile.TemporaryDirectory() as work:
-        tar = os.path.join(work, "python.tar.gz")
-        with urllib.request.urlopen(asset["browser_download_url"], timeout=600) as r, \
-                open(tar, "wb") as f:
-            shutil.copyfileobj(r, f, 1 << 20)
         h = hashlib.sha256()
         with open(tar, "rb") as f:
             for block in iter(lambda: f.read(1 << 20), b""):
                 h.update(block)
         if h.hexdigest() != want:
+            # A kept file that is wrong would be resumed for ever: take it away
+            # so the next try starts clean.
+            try:
+                os.remove(tar)
+            except OSError:
+                pass
             raise RuntimeError("the Python download did not match its checksum")
         with tarfile.open(tar) as t:
             t.extractall(work, filter="data")       # nothing outside the folder
         shutil.rmtree(PY_DIR, ignore_errors=True)
         os.makedirs(os.path.dirname(PY_DIR), exist_ok=True)
         shutil.move(os.path.join(work, "python"), PY_DIR)
+    try:
+        os.remove(tar)                 # it is unpacked; the 67 MB can go
+    except OSError:
+        pass
     mine = os.path.join(PY_DIR, "bin", "python3.12")
     if not os.path.exists(mine):
         raise RuntimeError("the Python download had no python3.12 in it")
