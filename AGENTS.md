@@ -50,7 +50,7 @@ action, and a few comments about what other clients can see.
 | `scripts/jobs.py` | 172 | Everything the card is busy with, in one shape. Reads only. |
 | `scripts/meaning.py` | 130 | What a word means, offline (`sdcv`) or online. |
 | `scripts/beat.py` | 74 | Reads MPD's FIFO and prints a line per beat, for the dancer. |
-| `tests/security_test.py` | 4902 | 312 tests. Run them after every change. |
+| `tests/security_test.py` | 5523 | 331 tests. Run them after every change. |
 
 ## How it fits together
 
@@ -187,7 +187,7 @@ omarchy-shell songbook probe              # "home rows=14 w=328 h=26"
 omarchy-shell songbook titles             # what the rows actually say
 omarchy-shell songbook press <row key>    # exactly what a click does
 omarchy-shell songbook pressAction <key>  # the small button on the right
-python3 tests/security_test.py            # 312 tests
+python3 tests/security_test.py            # 331 tests
 journalctl --user --since "2 min ago" | grep -i "songbook\|QML"
 ```
 

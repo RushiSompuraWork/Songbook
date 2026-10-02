@@ -108,7 +108,7 @@ scripts/
 ├── kokoro_say.py .... 83   runs inside the private venv, reports word times
 └── beat.py .......... 74   beats from MPD's audio, no numpy, no cava
 
-tests/security_test.py  3084   189 tests — real MPDs on a spare port,
+tests/security_test.py  5523   331 tests — real MPDs on a spare port,
                                throwaway HOMEs, headless reader renders
 ```
 
