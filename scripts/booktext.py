@@ -404,9 +404,16 @@ ABBREV = {"mr.", "mrs.", "ms.", "dr.", "st.", "jr.", "sr.", "vs.", "etc.", "e.g.
 END = re.compile(r"[.!?…。！？]+[\"'”’»)\]]*$")
 
 
-def spread(text, t, e):
-    """Word times across a line by length, when the source gives only the line's."""
+def spread(text, t, e, most=None):
+    """Word times across a line by length, when the source gives only the line's.
+
+    `most` stops one line being turned into more words than anything could
+    keep. It is left off when only part of a chapter is wanted, because the
+    part asked for may lie past the first `most` words of the line.
+    """
     words = text.split()
+    if most is not None and len(words) > most:
+        words = words[:most]
     if t is None:
         return [(w, -1) for w in words]
     if e is None or e <= t:
@@ -458,20 +465,44 @@ def build(cues, start=None, end=None):
         if c["e"] is None and c["t"] is not None:
             nxt = next((d["t"] for d in cues[i + 1:] if d["t"] is not None and d["t"] > c["t"]), None)
             c["e"] = nxt
+    # MAX_WORDS is the bound on what comes out, and it is applied as the words
+    # are made, not after. A SMIL file may point at the same fragment as often
+    # as it likes, and every reference used to be expanded and kept before the
+    # bound was reached: 50 references to 200,000 words peaked at 1,648 MB to
+    # keep 60,000 of them (measured 2026-10-02, from a marketplace reviewer's
+    # reading of the source). Wanting a hundredth of what was made is not a
+    # reason to make it.
     stream = []                  # (word, t, paragraph starts here)
     last_end = None
+    low = start - 0.5 if start is not None else None
+    high = (end if end is not None else 1e12) if start is not None else None
+
+    def wanted(t):
+        return low is None or t < 0 or low <= t < high
+
     for c in cues:
+        if len(stream) >= MAX_WORDS:
+            break                # enough: the rest is not expanded at all
+        # A cue that ends before the part asked for, or starts after it, has
+        # nothing to give; skipping it before expanding is the whole saving
+        # when one fragment is referenced over and over.
+        if low is not None and c["t"] is not None \
+                and (c["t"] >= high or (c["e"] is not None and c["e"] < low)):
+            if c["e"] is not None:
+                last_end = c["e"]
+            continue
         words = join_marks(c["words"]) if c["words"] \
-            else spread(c["text"], c["t"], c["e"])
+            else spread(c["text"], c["t"], c["e"], MAX_WORDS if low is None else None)
         # A pause of two seconds or more between lines reads as a new paragraph.
         gap = c["t"] is not None and last_end is not None and c["t"] - last_end >= 2.0
         for n, (w, t) in enumerate(words):
+            if not wanted(t):
+                continue
             stream.append((w, t, n == 0 and (c["brk"] or gap)))
+            if len(stream) >= MAX_WORDS:
+                break
         if c["e"] is not None:
             last_end = c["e"]
-    if start is not None:
-        stream = [s for s in stream if s[1] < 0 or (start - 0.5 <= s[1] < (end or 1e12))]
-    stream = stream[:MAX_WORDS]
     paras, sentence, para = [], [], []
     for w, t, brk in stream:
         if brk and (sentence or para):
